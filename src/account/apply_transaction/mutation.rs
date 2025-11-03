@@ -69,7 +69,7 @@ where
         .try_fold(Undo::<M>::with_capacity(count), |to_undo, next| match next.mutate(value) {
             Ok(undo) => to_undo.push(undo).pipe(Ok),
             Err(reason) => {
-                tracing::warn!("ROLLING BACK:\n{reason:?}");
+                eprintln!("[ERR] ROLLING BACK:\n{reason:?}");
                 to_undo.undo(value, &reason);
                 Err(reason)
             }

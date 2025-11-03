@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
                 .pipe(|res| {
                     if let Err(reason) = res {
                         // if error occurs, the system should continue as normal - no mutation occurred
-                        tracing::warn!("could not apply transaction:\n{reason:?}");
+                        eprintln!("[ERR] could not apply transaction:\n{reason:?}");
                     }
                     acc
                 })
