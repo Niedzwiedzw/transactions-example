@@ -5,13 +5,13 @@ use tap::Pipe;
 
 use crate::{
     account::apply_transaction::{BalanceTransaction, mutation::Mutate},
-    transaction::{Amount, Client, Tx, dispute::Dispute},
+    transaction::{Amount, Client, Tx, chargeback::Chargeback, dispute::Dispute},
 };
 
 pub mod apply_transaction;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 /// [crate::transaction::Client]'s account state
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AccountFunds {
     /// The total funds that are available for trading, staking,
     /// withdrawal, etc.
@@ -78,9 +78,9 @@ impl Mutate<BalanceTransactionHistory> for BalanceTransactionHistoryMutation {
             BalanceTransactionHistoryMutation::Insert(tx, transaction) => match value.contains_key(&tx) {
                 false => value
                     .insert(tx, transaction)
-                    .pipe(|v| assert_is_none(v, "expected key to be checked"))
-                    .pipe(|()| Self::Remove(tx))
-                    .pipe(Ok),
+                    .pipe(assert_is_none)
+                    .context("expected key to be checked")
+                    .map(|()| Self::Remove(tx)),
                 true => Err(anyhow::anyhow!("Dispute for {tx:?} already exists")),
             },
             BalanceTransactionHistoryMutation::Remove(tx) => value
@@ -97,20 +97,21 @@ pub enum CurrentDisputesMutation {
     Remove(Tx),
 }
 
-fn assert_is_none<T>(v: Option<T>, context: &'static str) {
-    if let Some(_v) = v {
-        unreachable!("expected value to be None: {context}")
-    }
+fn assert_is_none<T>(v: Option<T>) -> anyhow::Result<()> {
+    v.is_none()
+        .then_some(())
+        .context("expected value to be none")
 }
+
 impl Mutate<CurrentDisputes> for CurrentDisputesMutation {
     fn mutate(self, value: &mut CurrentDisputes) -> anyhow::Result<Self> {
         match self {
             CurrentDisputesMutation::Insert(tx, dispute) => match value.contains_key(&tx) {
                 false => value
                     .insert(tx, dispute)
-                    .pipe(|v| assert_is_none(v, "expected key to be checked"))
-                    .pipe(|()| Self::Remove(tx))
-                    .pipe(Ok),
+                    .pipe(assert_is_none)
+                    .context("expected key to be checked")
+                    .map(|()| Self::Remove(tx)),
                 true => Err(anyhow::anyhow!("Dispute for {tx:?} already exists")),
             },
             CurrentDisputesMutation::Remove(tx) => value
@@ -125,11 +126,13 @@ impl Mutate<CurrentDisputes> for CurrentDisputesMutation {
 pub struct AccountState {
     pub history: BalanceTransactionHistory,
     pub disputes: CurrentDisputes,
+    pub chargeback: Option<Chargeback>,
     pub funds: AccountFunds,
 }
 
 #[derive(Debug, derive_more::From)]
 pub enum AccountStateMutation {
+    Chargeback(Option<Chargeback>),
     Disputes(CurrentDisputesMutation),
     Funds(AccountFundsMutation),
     History(BalanceTransactionHistoryMutation),
@@ -141,16 +144,9 @@ impl Mutate<AccountState> for AccountStateMutation {
             AccountStateMutation::Disputes(m) => m.mutate(&mut value.disputes).map(Self::Disputes),
             AccountStateMutation::History(m) => m.mutate(&mut value.history).map(Self::History),
             AccountStateMutation::Funds(m) => m.mutate(&mut value.funds).map(Self::Funds),
-        }
-    }
-}
-
-impl AccountState {
-    pub fn with_funds(funds: AccountFunds) -> Self {
-        Self {
-            history: Default::default(),
-            disputes: Default::default(),
-            funds,
+            AccountStateMutation::Chargeback(chargeback) => chargeback
+                .mutate(&mut value.chargeback)
+                .map(Self::Chargeback),
         }
     }
 }

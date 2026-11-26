@@ -1,4 +1,4 @@
-use tap::Pipe;
+use tap::{Pipe, TapFallible};
 
 /// a simple contract - this type must mutate the element and
 /// return a reverse mutation
@@ -59,7 +59,7 @@ impl<M> Undo<M> {
 
 /// Performs mutations `M` in one transaction, guaranteeing that in case one of the mutations fails, they are all reverted,
 /// so the state of `T` is unchanged
-pub fn in_one_transaction<M, T>(value: &mut T, mutations: Vec<M>) -> anyhow::Result<Undo<M>>
+fn in_one_transaction<M, T>(value: &mut T, mutations: Vec<M>) -> anyhow::Result<Undo<M>>
 where
     M: Mutate<T> + std::fmt::Debug,
 {
@@ -96,12 +96,82 @@ where
     pub fn mutate(mut self, mutate: impl FnOnce(&T) -> anyhow::Result<Vec<M>>) -> anyhow::Result<Self> {
         mutate(self.state)
             .and_then(|mutations| in_one_transaction(self.state, mutations))
+            .tap_err(|reason| std::mem::take(&mut self.undo).undo(self.state, &reason))
             .map(|undo| {
                 self.undo.0.extend(undo.0);
                 self
             })
     }
-    pub fn finish(self) -> &'a T {
-        self.state
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct Value(u32);
+
+    #[derive(Debug)]
+    enum Mutation {
+        Set(Value),
+        Fail,
+    }
+
+    impl Mutate<Value> for Mutation {
+        fn mutate(self, value: &mut Value) -> anyhow::Result<Self> {
+            match self {
+                Self::Set(next) => Ok(Self::Set(std::mem::replace(value, next))),
+                Self::Fail => anyhow::bail!("mutation failed"),
+            }
+        }
+    }
+
+    #[test]
+    fn failed_batch_undoes_mutations_in_reverse_order() {
+        let mut value = Value(7);
+
+        let result = in_one_transaction(&mut value, vec![Mutation::Set(Value(11)), Mutation::Set(Value(19)), Mutation::Fail]);
+
+        assert!(result.is_err());
+        assert_eq!(value, Value(7));
+    }
+
+    #[test]
+    fn validation_failure_undoes_previous_stage() {
+        let mut value = Value(7);
+
+        let result = TransactionState::<_, Mutation>::new(&mut value)
+            .mutate(|_| Ok(vec![Mutation::Set(Value(11))]))
+            .and_then(|transaction| transaction.mutate(|_| anyhow::bail!("validation failed")))
+            .map(|_| ());
+
+        assert!(result.is_err());
+        assert_eq!(value, Value(7));
+    }
+
+    #[test]
+    fn failed_later_batch_undoes_all_stages() {
+        let mut value = Value(7);
+
+        let result = TransactionState::<_, Mutation>::new(&mut value)
+            .mutate(|_| Ok(vec![Mutation::Set(Value(11))]))
+            .and_then(|transaction| transaction.mutate(|_| Ok(vec![Mutation::Set(Value(19)), Mutation::Fail])))
+            .map(|_| ());
+
+        assert!(result.is_err());
+        assert_eq!(value, Value(7));
+    }
+
+    #[test]
+    fn successful_stages_preserve_changes() {
+        let mut value = Value(7);
+
+        let result = TransactionState::<_, Mutation>::new(&mut value)
+            .mutate(|_| Ok(vec![Mutation::Set(Value(11))]))
+            .and_then(|transaction| transaction.mutate(|_| Ok(vec![Mutation::Set(Value(19))])))
+            .map(|_| ());
+
+        assert!(result.is_ok());
+        assert_eq!(value, Value(19));
     }
 }

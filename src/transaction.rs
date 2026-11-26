@@ -1,5 +1,6 @@
 use anyhow::Context;
-use serde::Deserialize;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use tap::Pipe;
 
 use crate::transaction::{chargeback::Chargeback, deposit::Deposit, dispute::Dispute, resolve::Resolve, withdrawal::Withdrawal};
@@ -22,11 +23,30 @@ pub struct Tx(u32);
 /// TODO: Make an actual newtype for safer maths:
 ///    [crate::transaction::withdrawal::Withdrawal] amounts whould not be a negative number
 ///    [crate::transaction::deposit::Deposit] amounts whould not be a negative number either
-pub type Amount = rust_decimal::Decimal;
+pub type Amount = Decimal;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, derive_more::AsRef, derive_more::Deref, derive_more::Add)]
+pub struct NonNegative<T>(T);
+
+impl<'de> Deserialize<'de> for NonNegative<Amount> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        <Amount as serde::de::Deserialize>::deserialize(deserializer)
+            .and_then(|v| {
+                (v >= Amount::ZERO)
+                    .then_some(v)
+                    .ok_or_else(|| serde::de::Error::custom(format!("non-negative value expected, found '{v}'")))
+            })
+            .map(Self)
+    }
+}
 
 pub mod deposit {
     use {
         super::{Amount, Client, Tx},
+        crate::transaction::NonNegative,
         serde::Deserialize,
     };
 
@@ -37,13 +57,14 @@ pub mod deposit {
     pub struct Deposit {
         pub client: Client,
         pub tx: Tx,
-        pub amount: Amount,
+        pub amount: NonNegative<Amount>,
     }
 }
 
 pub mod withdrawal {
     use {
         super::{Amount, Client, Tx},
+        crate::transaction::NonNegative,
         serde::Deserialize,
     };
 
@@ -58,7 +79,7 @@ pub mod withdrawal {
     pub struct Withdrawal {
         pub client: Client,
         pub tx: Tx,
-        pub amount: Amount,
+        pub amount: NonNegative<Amount>,
     }
 }
 
@@ -133,7 +154,7 @@ pub mod chargeback {
     /// doesn't exist, or the tx isn't under dispute,
     /// you can ignore chargeback and assume this is an error on our
     /// partner's side.
-    #[derive(Debug, Deserialize, Clone)]
+    #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
     pub struct Chargeback {
         pub client: Client,
         pub tx: Tx,
@@ -150,17 +171,7 @@ pub enum TransactionKind {
     Chargeback,
 }
 
-impl TransactionKind {
-    pub fn from(transaction: &Transaction) -> Self {
-        match transaction {
-            Transaction::Deposit(_) => TransactionKind::Deposit,
-            Transaction::Withdrawal(_) => TransactionKind::Withdrawal,
-            Transaction::Dispute(_) => TransactionKind::Dispute,
-            Transaction::Resolve(_) => TransactionKind::Resolve,
-            Transaction::Chargeback(_) => TransactionKind::Chargeback,
-        }
-    }
-}
+impl TransactionKind {}
 
 impl<'de> serde::Deserialize<'de> for Transaction {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -173,7 +184,7 @@ impl<'de> serde::Deserialize<'de> for Transaction {
             pub kind: TransactionKind,
             pub client: Client,
             pub tx: Tx,
-            pub amount: Option<Amount>,
+            pub amount: Option<NonNegative<Amount>>,
         }
         Row::deserialize(deserializer).and_then(|Row { kind, client, tx, amount }| {
             match kind {
@@ -209,18 +220,6 @@ pub enum Transaction {
 }
 
 impl Transaction {
-    pub fn id(&self) -> Tx {
-        match self {
-            Transaction::Deposit(i) => i.tx,
-            Transaction::Withdrawal(i) => i.tx,
-            Transaction::Dispute(i) => i.tx,
-            Transaction::Resolve(i) => i.tx,
-            Transaction::Chargeback(i) => i.tx,
-        }
-    }
-    pub fn kind(&self) -> TransactionKind {
-        TransactionKind::from(self)
-    }
     pub fn client(&self) -> Client {
         match self {
             Transaction::Deposit(i) => i.client,
